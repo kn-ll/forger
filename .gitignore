@@ -1,0 +1,15 @@
+# macOS / IDE
+.DS_Store
+.idea/
+
+# Forger local runtime state
+.forger/
+data/
+log/
+*.md.lock
+
+# Go local build/test outputs
+/forger
+/bin/
+*.test
+forger
