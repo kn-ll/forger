@@ -13,10 +13,12 @@ type Kind string
 
 const (
 	KindThreadCreated    Kind = "thread.created"
-	KindThreadUpdated    Kind = "thread.updated"
 	KindMessageAppended  Kind = "message.appended"
 	KindRunCreated       Kind = "run.created"
 	KindRunStatusChanged Kind = "run.status_changed"
+	KindToolCallCreated  Kind = "toolcall.created"
+	KindToolCallUpdated  Kind = "toolcall.updated"
+	KindArtifactCreated  Kind = "artifact.created"
 )
 
 // Envelope 是 sessions/<thread-id>.jsonl 的统一事件包装格式。

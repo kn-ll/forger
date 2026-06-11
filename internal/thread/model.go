@@ -3,6 +3,9 @@ package thread
 import (
 	"strings"
 	"time"
+
+	"github.com/kn-ll/forger/internal/artifacts"
+	"github.com/kn-ll/forger/internal/tools"
 )
 
 // Status 表示线程生命周期状态。第一阶段只区分打开和归档，后续可以扩展为
@@ -44,6 +47,8 @@ type Thread struct {
 	UpdatedAt time.Time
 	Messages  []Message // 这个 thread 里交流了什么
 	Runs      []Run     // 这个 thread 里执行了哪些任务，它们现在什么状态
+	ToolCalls []tools.Call
+	Artifacts []artifacts.Artifact
 }
 
 // Message 是 thread 内的最小上下文单元。后续可以增加 artifact refs、tool refs

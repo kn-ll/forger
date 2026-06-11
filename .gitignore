@@ -9,7 +9,6 @@ log/
 *.md.lock
 
 # Go local build/test outputs
-/forger
 /bin/
 *.test
-forger
+/forger

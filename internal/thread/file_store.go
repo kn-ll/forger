@@ -13,8 +13,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/kn-ll/forger/internal/artifacts"
 	"github.com/kn-ll/forger/internal/events"
 	"github.com/kn-ll/forger/internal/storage"
+	"github.com/kn-ll/forger/internal/tools"
 )
 
 type FileStore struct {
@@ -40,12 +42,6 @@ type threadCreatedPayload struct {
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
-type threadUpdatedPayload struct {
-	Title     string    `json:"title,omitempty"`
-	Status    Status    `json:"status,omitempty"`
-	UpdatedAt time.Time `json:"updated_at"`
-}
-
 type messageAppendedPayload struct {
 	Message Message `json:"message"`
 }
@@ -59,6 +55,18 @@ type runStatusChangedPayload struct {
 	Status    RunStatus `json:"status"`
 	StartedAt time.Time `json:"started_at,omitempty"`
 	EndedAt   time.Time `json:"ended_at,omitempty"`
+}
+
+type toolCallCreatedPayload struct {
+	ToolCall tools.Call `json:"tool_call"`
+}
+
+type toolCallUpdatedPayload struct {
+	ToolCall tools.Call `json:"tool_call"`
+}
+
+type artifactCreatedPayload struct {
+	Artifact artifacts.Artifact `json:"artifact"`
 }
 
 // NextIDState 是文件层的 JSON 轻量状态。它只负责稳定分配 thread 编号，不承载
@@ -171,9 +179,6 @@ func (s *FileStore) AppendMessage(ctx context.Context, threadID string, req Appe
 	}
 	item.Messages = append(item.Messages, msg)
 	item.UpdatedAt = now
-	if err := s.appendSessionEventLocked(threadID, events.KindThreadUpdated, now, threadUpdatedPayload{UpdatedAt: now}); err != nil {
-		return Message{}, err
-	}
 	if err := s.appendIndexLocked(indexRecordFromThread(item)); err != nil {
 		return Message{}, err
 	}
@@ -205,9 +210,6 @@ func (s *FileStore) CreateRun(ctx context.Context, threadID string, req CreateRu
 	}
 	item.Runs = append(item.Runs, run)
 	item.UpdatedAt = now
-	if err := s.appendSessionEventLocked(threadID, events.KindThreadUpdated, now, threadUpdatedPayload{UpdatedAt: now}); err != nil {
-		return Run{}, err
-	}
 	if err := s.appendIndexLocked(indexRecordFromThread(item)); err != nil {
 		return Run{}, err
 	}
@@ -256,13 +258,98 @@ func (s *FileStore) UpdateRun(ctx context.Context, threadID string, runID string
 	}
 	item.Runs[idx] = run
 	item.UpdatedAt = now
-	if err := s.appendSessionEventLocked(threadID, events.KindThreadUpdated, now, threadUpdatedPayload{UpdatedAt: now}); err != nil {
-		return Run{}, err
-	}
 	if err := s.appendIndexLocked(indexRecordFromThread(item)); err != nil {
 		return Run{}, err
 	}
 	return run, nil
+}
+
+// AppendToolCall 追加一条 ToolCall 事件。
+func (s *FileStore) AppendToolCall(ctx context.Context, threadID string, call tools.Call) (tools.Call, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	item, err := s.loadThreadLocked(ctx, threadID)
+	if err != nil {
+		return tools.Call{}, err
+	}
+	now := time.Now().UTC()
+	if call.ID == "" {
+		call.ID = fmt.Sprintf("tool-%06d", len(item.ToolCalls)+1)
+	}
+	if call.ThreadID == "" {
+		call.ThreadID = threadID
+	}
+	if call.StartedAt.IsZero() {
+		call.StartedAt = now
+	}
+	kind := events.KindToolCallCreated
+	for _, existing := range item.ToolCalls {
+		if existing.ID == call.ID {
+			kind = events.KindToolCallUpdated
+			break
+		}
+	}
+	createdPayload := toolCallCreatedPayload{ToolCall: call}
+	if kind == events.KindToolCallUpdated {
+		if call.FinishedAt.IsZero() && (call.Status == tools.CallSucceeded || call.Status == tools.CallFailed) {
+			call.FinishedAt = now
+		}
+	}
+	if kind == events.KindToolCallCreated {
+		if err := s.appendSessionEventLocked(threadID, kind, now, createdPayload); err != nil {
+			return tools.Call{}, err
+		}
+	} else {
+		if err := s.appendSessionEventLocked(threadID, kind, now, toolCallUpdatedPayload{ToolCall: call}); err != nil {
+			return tools.Call{}, err
+		}
+	}
+	if kind == events.KindToolCallCreated {
+		item.ToolCalls = append(item.ToolCalls, call)
+	} else {
+		for i := range item.ToolCalls {
+			if item.ToolCalls[i].ID == call.ID {
+				item.ToolCalls[i] = call
+				break
+			}
+		}
+	}
+	item.UpdatedAt = now
+	if err := s.appendIndexLocked(indexRecordFromThread(item)); err != nil {
+		return tools.Call{}, err
+	}
+	return call, nil
+}
+
+// AppendArtifact 追加一条 Artifact 事件。
+func (s *FileStore) AppendArtifact(ctx context.Context, threadID string, artifact artifacts.Artifact) (artifacts.Artifact, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	item, err := s.loadThreadLocked(ctx, threadID)
+	if err != nil {
+		return artifacts.Artifact{}, err
+	}
+	now := time.Now().UTC()
+	if artifact.ID == "" {
+		artifact.ID = fmt.Sprintf("art-%06d", len(item.Artifacts)+1)
+	}
+	if artifact.ThreadID == "" {
+		artifact.ThreadID = threadID
+	}
+	if artifact.CreatedAt.IsZero() {
+		artifact.CreatedAt = now
+	}
+	if err := s.appendSessionEventLocked(threadID, events.KindArtifactCreated, now, artifactCreatedPayload{Artifact: artifact}); err != nil {
+		return artifacts.Artifact{}, err
+	}
+	item.Artifacts = append(item.Artifacts, artifact)
+	item.UpdatedAt = now
+	if err := s.appendIndexLocked(indexRecordFromThread(item)); err != nil {
+		return artifacts.Artifact{}, err
+	}
+	return artifact, nil
 }
 
 func (s *FileStore) loadThreadLocked(ctx context.Context, id string) (Thread, error) {
@@ -313,18 +400,6 @@ func applyEvent(item *Thread, envelope events.Envelope) error {
 		item.Status = payload.Status
 		item.CreatedAt = payload.CreatedAt
 		item.UpdatedAt = payload.UpdatedAt
-	case events.KindThreadUpdated:
-		var payload threadUpdatedPayload
-		if err := json.Unmarshal(envelope.Payload, &payload); err != nil {
-			return err
-		}
-		if payload.Title != "" {
-			item.Title = payload.Title
-		}
-		if payload.Status != "" {
-			item.Status = payload.Status
-		}
-		item.UpdatedAt = payload.UpdatedAt
 	case events.KindMessageAppended:
 		var payload messageAppendedPayload
 		if err := json.Unmarshal(envelope.Payload, &payload); err != nil {
@@ -365,6 +440,39 @@ func applyEvent(item *Thread, envelope events.Envelope) error {
 			return nil
 		}
 		return fmt.Errorf("run not found while replaying: %s", payload.RunID)
+	case events.KindToolCallCreated:
+		var payload toolCallCreatedPayload
+		if err := json.Unmarshal(envelope.Payload, &payload); err != nil {
+			return err
+		}
+		item.ToolCalls = append(item.ToolCalls, payload.ToolCall)
+		if item.UpdatedAt.Before(envelope.CreatedAt) {
+			item.UpdatedAt = envelope.CreatedAt
+		}
+	case events.KindToolCallUpdated:
+		var payload toolCallUpdatedPayload
+		if err := json.Unmarshal(envelope.Payload, &payload); err != nil {
+			return err
+		}
+		for i := range item.ToolCalls {
+			if item.ToolCalls[i].ID == payload.ToolCall.ID {
+				item.ToolCalls[i] = payload.ToolCall
+				if item.UpdatedAt.Before(envelope.CreatedAt) {
+					item.UpdatedAt = envelope.CreatedAt
+				}
+				return nil
+			}
+		}
+		return fmt.Errorf("tool call not found while replaying: %s", payload.ToolCall.ID)
+	case events.KindArtifactCreated:
+		var payload artifactCreatedPayload
+		if err := json.Unmarshal(envelope.Payload, &payload); err != nil {
+			return err
+		}
+		item.Artifacts = append(item.Artifacts, payload.Artifact)
+		if item.UpdatedAt.Before(payload.Artifact.CreatedAt) {
+			item.UpdatedAt = payload.Artifact.CreatedAt
+		}
 	default:
 		return fmt.Errorf("unsupported event kind: %s", envelope.Kind)
 	}

@@ -6,7 +6,7 @@
 
 目标是把 Forger 做成一个本地优先的线程化 agent 工作台，能力形态对齐 Codex / Claude Code：用户面对的是持续工作的 agent workspace，而不是一组割裂的 CLI 命令。
 
-当前仓库已经按新产品方向重建，已有 `thread`、`tools`、`approvals`、`artifacts`、`monitoring`、`storage` 等基础模型，并且从第一天起就采用正式产品结构，而不是临时原型结构。
+当前仓库已经按新产品方向重建，已有 `thread`、`tools`、`approvals`、`artifacts`、`storage` 等基础模型，并且从第一天起就采用正式产品结构，而不是临时原型结构。`monitoring` 当前仅保留设计目标，尚未重新实现。
 
 ## 1. 产品定位
 
@@ -24,6 +24,7 @@ Forger = Thread Runtime + Tool Runtime + Skills + Context + Memory + Artifacts +
 - RAG 不应该主导代码理解；代码理解优先依赖确定性搜索、文件树、符号、AST / LSP、git 历史。
 - Memory 不是聊天记录归档；Memory 是经过治理的长期偏好、规则、事实和决策。
 - 安全、审批、审计、恢复能力是产品底座，不是后补功能。
+- Monitoring 不应被简化为图表；它首先是 thread/run 可观测性、audit 和 governance，其次才是 analytics。
 
 ## 2. 设计原则
 
@@ -48,7 +49,7 @@ Forger = Thread Runtime + Tool Runtime + Skills + Context + Memory + Artifacts +
 | `internal/tools` | 有 Spec、Risk、Call | 模型可保留，需要补 registry、schema、executor |
 | `internal/approvals` | 有 Request 模型 | 需要补 policy、decision、持久化和 CLI / UI 交互 |
 | `internal/artifacts` | 有 Artifact 模型 | 需要补 artifact manager、hash、preview、producer |
-| `internal/monitoring` | 有 Event、RunSummary | 需要补 writer、query、audit 和 failure 分类 |
+| `internal/monitoring` | 当前未实现 | 后续按 Codex-style observability 一次性重建 writer、query、audit 和 analytics |
 | `internal/storage` | 已固定目录布局与文件命名 | 方向正确，需要继续补齐 JSONL event envelope、SQLite schema 和索引写入器 |
 
 ### 3.2 当前关键缺口
@@ -71,7 +72,6 @@ Forger = Thread Runtime + Tool Runtime + Skills + Context + Memory + Artifacts +
 ```text
 forger                         # 打开默认工作台，或进入交互式 thread workspace
 forger thread new "<title>"    # 创建 thread
-forger run "<goal>"            # 在当前或新 thread 中启动 run
 forger thread list
 forger thread show <thread-id>
 forger thread open <thread-id>
@@ -81,14 +81,6 @@ forger skills
 forger memory
 forger tools
 forger settings
-```
-
-兼容 UX：
-
-```text
-forger code "<goal>"            # 等价于 forger run --skill coding.implement
-forger review                   # 等价于 forger run --skill coding.review
-forger explain <file-or-symbol> # 等价于 forger run --skill coding.explain
 ```
 
 内部 / 高级 UX：
@@ -110,7 +102,8 @@ forger debug index
 - 大型 admin 命令树。
 - 复杂 RAG eval。
 - embedding preparation。
-- 单独的 codingrun 产品入口。
+- 把 `run` 暴露成独立主心智。
+- `forger run`、`forger code`、`forger review`、`forger explain` 这类单次命令式入口。
 
 ## 5. 核心对象重新设计
 
@@ -380,7 +373,7 @@ Persist ContextPack
 | `internal/tools` | 保留模型，增加 schema、capability、tool identity |
 | `internal/approvals` | 增加 policy engine、decision store、approval scope |
 | `internal/artifacts` | 增加 manager、content store、hash、preview |
-| `internal/monitoring` | 增加 event writer、query、audit、failure classification |
+| `internal/monitoring` | 按 Codex-style observability 新增 runtime state、audit、analytics 查询层 |
 | `internal/storage` | 增加正式 SQLite schema、索引写入器、rebuild index |
 | `cmd/forger` | 继续保持薄入口，只做参数解析和 runtime 调用 |
 
@@ -501,6 +494,41 @@ Forger 主实现语言为 Go，因此执行框架优先级如下：
 - `failure_events`
 - `cost_events`
 - `tool_latency_daily`
+
+### 8.2.1 Monitoring 的 Codex-style 表象
+
+Forger 的 monitoring 采用三层表象，而不是单纯做一组图表：
+
+1. Runtime state
+   - thread activity
+   - run timeline
+   - tool call progress
+   - approval wait points
+   - artifact creation
+2. Audit / governance
+   - risky actions
+   - approval decisions
+   - tool execution trace
+   - compliance-oriented export records
+3. Analytics
+   - run counts
+   - success rate
+   - tool latency
+   - approval wait time
+   - token / cost trends
+
+主产品表象优先级：
+
+1. thread 内 timeline
+2. run detail
+3. approval / tool trace visibility
+4. debug / governance query
+5. analytics dashboard
+
+因此：
+
+- `logs.sqlite` 首先服务于可追溯性和 thread/run 状态解释。
+- 图表是后续聚合视图，不是 monitoring 的第一落点。
 
 `memories.sqlite`：
 
@@ -903,24 +931,30 @@ Worker subagent 如果修改代码，必须使用隔离 worktree，并把 diff �
 
 目标：建立统一运行入口，但暂不接真实模型。
 
+状态：已完成。
+
 任务：
 
 1. 新增 `internal/runtime`。
 2. 新增 `internal/agentbackend` 抽象，但先只提供占位 backend。
 3. 实现 `StartRun`、`CancelRun`、`ResumeRun` 接口。
 4. run 状态写入 event stream。
-5. monitoring 写入 run started / completed。
-6. CLI 增加 `forger run "<goal>"`，先生成占位 agent response。
 
 验收：
 
-- `forger run` 会创建 thread 或复用 thread。
+- runtime 能创建或复用 thread 并启动一次 run。
 - run lifecycle 可在 thread 中查看。
 - run event 可审计。
+
+实现文档：
+
+- 详见 [AGENT_WORKBENCH_PHASE2.md](./AGENT_WORKBENCH_PHASE2.md)
 
 ### Phase 3：Tool Runtime 和只读工具
 
 目标：统一工具注册、执行、审计。
+
+状态：已完成。
 
 任务：
 
@@ -935,6 +969,10 @@ Worker subagent 如果修改代码，必须使用隔离 worktree，并把 diff �
 - 每个工具调用都有 ToolCall record。
 - 只读 coding context 可通过工具获得。
 - 工具失败有结构化错误。
+
+实现文档：
+
+- 详见 [AGENT_WORKBENCH_PHASE3.md](./AGENT_WORKBENCH_PHASE3.md)
 
 ### Phase 4：Approval / Sandbox / Artifact
 
@@ -988,7 +1026,6 @@ Worker subagent 如果修改代码，必须使用隔离 worktree，并把 diff �
 
 验收：
 
-- `forger code` 成为 `forger run --skill coding.implement` 的别名。
 - skill 可以控制工具权限。
 - run 输出符合 skill expected artifacts。
 
@@ -1078,7 +1115,7 @@ Worker subagent 如果修改代码，必须使用隔离 worktree，并把 diff �
 
 中期成功标准：
 
-- `forger code`、`forger run`、TUI 共用同一 runtime。
+- thread workspace 和其他内部入口共用同一 runtime。
 - skill 能约束工具和输出。
 - artifact 成为后续上下文的一等来源。
 - memory 有 candidate / promoted 治理。

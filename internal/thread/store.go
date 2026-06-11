@@ -3,6 +3,9 @@ package thread
 import (
 	"context"
 	"errors"
+
+	"github.com/kn-ll/forger/internal/artifacts"
+	"github.com/kn-ll/forger/internal/tools"
 )
 
 // ErrTitleRequired 表示创建 thread 时缺少标题。
@@ -21,4 +24,6 @@ type Store interface {
 	AppendMessage(context.Context, string, AppendMessageRequest) (Message, error)
 	CreateRun(context.Context, string, CreateRunRequest) (Run, error)
 	UpdateRun(context.Context, string, string, UpdateRunRequest) (Run, error)
+	AppendToolCall(context.Context, string, tools.Call) (tools.Call, error)
+	AppendArtifact(context.Context, string, artifacts.Artifact) (artifacts.Artifact, error)
 }

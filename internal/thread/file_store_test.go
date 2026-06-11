@@ -8,7 +8,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/kn-ll/forger/internal/artifacts"
 	"github.com/kn-ll/forger/internal/events"
+	"github.com/kn-ll/forger/internal/tools"
 )
 
 func TestFileStoreReplaysThreadFromJSONLEvents(t *testing.T) {
@@ -106,8 +108,8 @@ func TestFileStoreMaintainsIndexSessionAndNextIDConsistency(t *testing.T) {
 		t.Fatal(err)
 	}
 	sessionLines := strings.Split(strings.TrimSpace(string(sessionBytes)), "\n")
-	if len(sessionLines) != 3 {
-		t.Fatalf("session lines = %d, want 3", len(sessionLines))
+	if len(sessionLines) != 2 {
+		t.Fatalf("session lines = %d, want 2", len(sessionLines))
 	}
 	var firstEnvelope events.Envelope
 	if err := json.Unmarshal([]byte(sessionLines[0]), &firstEnvelope); err != nil {
@@ -153,5 +155,47 @@ func TestFileStoreAppendMessageAndRunValidation(t *testing.T) {
 	}
 	if _, err := store.UpdateRun(context.Background(), created.ID, run.ID, UpdateRunRequest{}); err != ErrRunStatusRequired {
 		t.Fatalf("update run err = %v", err)
+	}
+}
+
+func TestFileStoreReplaysToolCallsAndArtifacts(t *testing.T) {
+	home := filepath.Join(t.TempDir(), ".forger")
+	store := NewFileStore(home)
+	created, err := store.Create(context.Background(), CreateRequest{Title: "Replay audit objects"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := store.CreateRun(context.Background(), created.ID, CreateRunRequest{Goal: "Goal"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	call, err := store.AppendToolCall(context.Background(), created.ID, tools.Call{
+		RunID:     run.ID,
+		Tool:      "file.tree",
+		Risk:      tools.RiskRead,
+		Status:    tools.CallSucceeded,
+		Output:    "README.md",
+		StartedAt: created.CreatedAt,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AppendArtifact(context.Background(), created.ID, artifacts.Artifact{
+		RunID: run.ID,
+		Kind:  artifacts.KindReport,
+		Title: "file.tree output",
+		URI:   filepath.Join(home, "artifacts", created.ID, "dummy", "content.txt"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.Get(context.Background(), created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.ToolCalls) != 1 || got.ToolCalls[0].ID != call.ID {
+		t.Fatalf("tool calls = %+v", got.ToolCalls)
+	}
+	if len(got.Artifacts) != 1 || got.Artifacts[0].Title != "file.tree output" {
+		t.Fatalf("artifacts = %+v", got.Artifacts)
 	}
 }
